@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>单摆模拟器 · Simple Pendulum</title>
+<style>
+  :root {
+    --bg: #1a1a24;
+    --ink: #8fa3bf;
+    --ink-strong: #d6e7ff;
+    --ink-dim: #55617a;
+    --accent: #5cc8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  body { user-select: none; -webkit-user-select: none; }
+  #stage {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    touch-action: none;
+    cursor: default;
+  }
+  .hud {
+    position: fixed;
+    z-index: 2;
+    font-family: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+    color: var(--ink);
+    pointer-events: none;
+  }
+  .panel {
+    top: 22px;
+    left: 22px;
+    min-width: 218px;
+    padding: 14px 16px 12px;
+    border: 1px solid rgba(92, 200, 255, 0.14);
+    border-radius: 10px;
+    background: linear-gradient(160deg, rgba(30, 36, 54, 0.72), rgba(20, 22, 33, 0.55));
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 0 24px rgba(92, 200, 255, 0.03);
+    backdrop-filter: blur(8px);
+  }
+  .title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    color: var(--ink-strong);
+  }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent), 0 0 22px rgba(92, 200, 255, 0.5);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  .dot.paused {
+    background: #ffb454;
+    box-shadow: 0 0 10px #ffb454, 0 0 20px rgba(255, 180, 84, 0.45);
+    animation: none;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.45; }
+    50% { opacity: 1; }
+  }
+  .sub {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 0.32em;
+    color: var(--ink-dim);
+  }
+  .stats {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(92, 200, 255, 0.1);
+    display: grid;
+    gap: 5px;
+    font-size: 11px;
+  }
+  .stats > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .stats span { color: var(--ink-dim); }
+  .stats b {
+    color: #cfe6ff;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .hint {
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    color: var(--ink-dim);
+    white-space: nowrap;
+  }
+  @media (max-width: 560px) {
+    .panel {
+      top: 12px;
+      left: 12px;
+      transform: scale(0.92);
+      transform-origin: top left;
+    }
+    .hint { font-size: 9px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div class="hud panel">
+  <div class="title"><span class="dot" id="stateDot"></span>SIMPLE PENDULUM</div>
+  <div class="sub">单摆 · 简谐振动</div>
+  <div class="stats">
+    <div><span>摆长 L</span><b>200 px</b></div>
+    <div><span>重力 g</span><b>9.8 m/s²</b></div>
+    <div><span>实时摆角 θ</span><b id="angleOut">+45.0°</b></div>
+    <div><span>角速度 ω</span><b id="omegaOut">0.00 rad/s</b></div>
+    <div><span>理论周期 T</span><b id="periodOut">2.01 s</b></div>
+  </div>
+</div>
+<div class="hud hint">拖动摆球改变角度 · R 重置 · 空格 暂停 / 继续</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  const angleOut = document.getElementById('angleOut');
+  const omegaOut = document.getElementById('omegaOut');
+  const periodOut = document.getElementById('periodOut');
+  const stateDot = document.getElementById('stateDot');
+
+  const L = 200;
+  const PX_PER_M = 200;
+  const G = 9.8;
+  const G_PX = G * PX_PER_M;
+  const DAMPING = 0.015;
+  const THETA0 = Math.PI / 4;
+  const MAX_THETA = Math.PI * 0.94;
+  const BOB_R = 22;
+  const FIXED_DT = 1 / 240;
+  const TRAIL_MS = 620;
+  const TAU = Math.PI * 2;
+
+  let W = 0;
+  let H = 0;
+  let cx = 0;
+  let cy = 0;
+  let theta = THETA0;
+  let omega = 0;
+  let paused = false;
+  let dragging = false;
+  let trail = [];
+  let lastTime = performance.now();
+  let accumulator = 0;
+  let hudLast = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = W / 2;
+    cy = Math.max(92, Math.min(H * 0.24, H - L - 96));
+    trail = [];
+  }
+
+  function bobPosition(t) {
+    return {
+      x: cx + L * Math.sin(t),
+      y: cy + L * Math.cos(t)
+    };
+  }
+
+  function accel(t, w) {
+    return -(G_PX / L) * Math.sin(t) - DAMPING * w;
+  }
+
+  function integrate(dt) {
+    const k1t = omega;
+    const k1w = accel(theta, omega);
+    const k2t = omega + 0.5 * dt * k1w;
+    const k2w = accel(theta + 0.5 * dt * k1t, omega + 0.5 * dt * k1w);
+    const k3t = omega + 0.5 * dt * k2w;
+    const k3w = accel(theta + 0.5 * dt * k2t, omega + 0.5 * dt * k2w);
+    const k4t = omega + dt * k3w;
+    const k4w = accel(theta + dt * k3t, omega + dt * k3w);
+    theta += (dt / 6) * (k1t + 2 * k2t + 2 * k3t + k4t);
+    omega += (dt / 6) * (k1w + 2 * k2w + 2 * k3w + k4w);
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = '#1a1a24';
+    ctx.fillRect(0, 0, W, H);
+
+    const halo = ctx.createRadialGradient(cx, cy - 70, 0, cx, cy - 70, Math.max(W, H) * 0.62);
+    halo.addColorStop(0, 'rgba(52, 76, 118, 0.30)');
+    halo.addColorStop(0.55, 'rgba(30, 38, 58, 0.12)');
+    halo.addColorStop(1, 'rgba(26, 26, 36, 0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, W, H);
+
+    const grid = 46;
+    ctx.strokeStyle = 'rgba(120, 170, 230, 0.032)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = cx % grid; x < W; x += grid) {
+      const px = Math.round(x) + 0.5;
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, H);
+    }
+    for (let y = cy % grid; y < H; y += grid) {
+      const py = Math.round(y) + 0.5;
+      ctx.moveTo(0, py);
+      ctx.lineTo(W, py);
+    }
+    ctx.stroke();
+
+    const vignette = ctx.createRadialGradient(
+      W / 2, H / 2, Math.min(W, H) * 0.25,
+      W / 2, H / 2, Math.max(W, H) * 0.78
+    );
+    vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vignette.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawGuide() {
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    ctx.strokeStyle = 'rgba(92, 200, 255, 0.07)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([1, 9]);
+    ctx.beginPath();
+    ctx.arc(0, 0, L, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    for (let i = 0; i < 24; i++) {
+      const phi = (i / 24) * TAU;
+      const long = i % 3 === 0;
+      const r1 = L + (long ? 6 : 3);
+      const r2 = L + (long ? 13 : 8);
+      ctx.strokeStyle = long ? 'rgba(120, 195, 255, 0.20)' : 'rgba(120, 195, 255, 0.09)';
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(phi) * r1, Math.sin(phi) * r1);
+      ctx.lineTo(Math.cos(phi) * r2, Math.sin(phi) * r2);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(150, 180, 220, 0.10)';
+    ctx.setLineDash([3, 8]);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, L + 46);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.restore();
+  }
+
+  function drawTrail(now) {
+    if (trail.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let i = 1; i < trail.length; i++) {
+      const a = trail[i - 1];
+      const b = trail[i];
+      const f = Math.max(0, 1 - (now - b.t) / TRAIL_MS);
+      if (f <= 0) continue;
+      ctx.strokeStyle = 'rgba(92, 200, 255, ' + (0.18 * f).toFixed(3) + ')';
+      ctx.lineWidth = 1 + 2 * f;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawPendulum(pos) {
+    const rod = ctx.createLinearGradient(cx, cy, pos.x, pos.y);
+    rod.addColorStop(0, 'rgba(150, 200, 255, 0.78)');
+    rod.addColorStop(1, 'rgba(92, 200, 255, 0.35)');
+    ctx.save();
+    ctx.strokeStyle = rod;
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(92, 200, 255, 0.45)';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const glow = ctx.createRadialGradient(
+      pos.x, pos.y, BOB_R * 0.2,
+      pos.x, pos.y, BOB_R * 3.2
+    );
+    glow.addColorStop(0, 'rgba(92, 200, 255, 0.34)');
+    glow.addColorStop(0.45, 'rgba(70, 160, 255, 0.12)');
+    glow.addColorStop(1, 'rgba(70, 160, 255, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, BOB_R * 3.2, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    const body = ctx.createRadialGradient(
+      pos.x - BOB_R * 0.35, pos.y - BOB_R * 0.45, BOB_R * 0.15,
+      pos.x, pos.y, BOB_R
+    );
+    body.addColorStop(0, '#d9f4ff');
+    body.addColorStop(0.28, '#7fd4ff');
+    body.addColorStop(0.65, '#2f93df');
+    body.addColorStop(1, '#123a5c');
+    ctx.save();
+    ctx.shadowColor = 'rgba(92, 200, 255, 0.85)';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, BOB_R, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(190, 235, 255, 0.75)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, BOB_R - 0.6, 0, TAU);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(pos.x - BOB_R * 0.3, pos.y - BOB_R * 0.38);
+    ctx.rotate(-0.6);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.62)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, BOB_R * 0.32, BOB_R * 0.18, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawPivot() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 34);
+    glow.addColorStop(0, 'rgba(150, 220, 255, 0.40)');
+    glow.addColorStop(1, 'rgba(92, 200, 255, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 34, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    const metal = ctx.createRadialGradient(cx - 2, cy - 3, 1, cx, cy, 9);
+    metal.addColorStop(0, '#e8f7ff');
+    metal.addColorStop(0.5, '#8fc9ee');
+    metal.addColorStop(1, '#2b5f86');
+    ctx.fillStyle = metal;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 7.5, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(190, 235, 255, 0.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  function updateHud(now) {
+    if (now - hudLast < 60) return;
+    hudLast = now;
+    const deg = theta * 180 / Math.PI;
+    angleOut.textContent = (deg >= 0 ? '+' : '') + deg.toFixed(1) + '°';
+    omegaOut.textContent = omega.toFixed(2) + ' rad/s';
+    stateDot.classList.toggle('paused', paused);
+  }
+
+  function frame(now) {
+    let delta = (now - lastTime) / 1000;
+    lastTime = now;
+    if (delta > 0.1) delta = 0.1;
+
+    if (!paused && !dragging) {
+      accumulator += delta;
+      let steps = 0;
+      while (accumulator >= FIXED_DT && steps < 600) {
+        integrate(FIXED_DT);
+        accumulator -= FIXED_DT;
+        steps++;
+      }
+      if (steps >= 600) accumulator = 0;
+    } else {
+      accumulator = 0;
+    }
+
+    const pos = bobPosition(theta);
+    if (!paused && !dragging) {
+      trail.push({ x: pos.x, y: pos.y, t: now });
+    }
+    while (trail.length && now - trail[0].t > TRAIL_MS) trail.shift();
+    if (trail.length > 120) trail.splice(0, trail.length - 120);
+
+    drawBackground();
+    drawGuide();
+    drawTrail(now);
+    drawPendulum(pos);
+    drawPivot();
+    updateHud(now);
+
+    requestAnimationFrame(frame);
+  }
+
+  function pointerPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function nearBob(p) {
+    const bob = bobPosition(theta);
+    const dx = p.x - bob.x;
+    const dy = p.y - bob.y;
+    const hit = BOB_R + 26;
+    return dx * dx + dy * dy <= hit * hit;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = pointerPos(e);
+    if (!nearBob(p)) return;
+    dragging = true;
+    omega = 0;
+    trail = [];
+    canvas.style.cursor = 'grabbing';
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointerPos(e);
+    if (dragging) {
+      let angle = Math.atan2(p.x - cx, p.y - cy);
+      angle = Math.max(-MAX_THETA, Math.min(MAX_THETA, angle));
+      theta = angle;
+      omega = 0;
+      e.preventDefault();
+    } else {
+      canvas.style.cursor = nearBob(p) ? 'grab' : 'default';
+    }
+  });
+
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    omega = 0;
+    canvas.style.cursor = 'default';
+    try {
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  }
+
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      paused = !paused;
+    } else if (e.key === 'r' || e.key === 'R') {
+      theta = THETA0;
+      omega = 0;
+      trail = [];
+    }
+  });
+
+  window.addEventListener('resize', resize);
+
+  resize();
+  periodOut.textContent = (2 * Math.PI * Math.sqrt((L / PX_PER_M) / G)).toFixed(2) + ' s';
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
