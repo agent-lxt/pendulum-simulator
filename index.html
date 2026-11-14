@@ -187,7 +187,7 @@
       y: cy + L * Math.cos(t)
     };
   }
-
+// commit3：添加阻尼注释，模拟真实摆动衰减效果
   function accel(t, w) {
     return -(G_PX / L) * Math.sin(t) - DAMPING * w;
   }
